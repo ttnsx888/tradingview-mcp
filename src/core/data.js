@@ -622,6 +622,27 @@ export async function batchReadPanes({ indices, reads, wait_ms } = {}) {
               var nm = safeCall(s, 'name');
               if (typeof nm === 'string') entry.name = nm;
               else if (typeof s.toolname === 'string') entry.name = s.toolname;
+              // Canonical type: match draw_list's snake_case identifier (e.g. "trend_line", "fib_retracement").
+              // Prefer the LineTool's internal toolname field if present; otherwise normalize the display name.
+              var canon = null;
+              var rawT = safeCall(s, 'toolname');
+              if (typeof rawT === 'string' && rawT.length > 0) canon = rawT;
+              if (!canon && typeof s.toolname === 'string') canon = s.toolname;
+              if (!canon && entry.name) {
+                var n = String(entry.name).trim().toLowerCase();
+                var nameMap = {
+                  'trend line': 'trend_line', 'trendline': 'trend_line',
+                  'horizontal line': 'horizontal_line', 'horizontal ray': 'horizontal_ray',
+                  'vertical line': 'vertical_line',
+                  'fib retracement': 'fib_retracement', 'fibonacci retracement': 'fib_retracement',
+                  'fib extension': 'fib_extension', 'fibonacci extension': 'fib_extension',
+                  'rectangle': 'rectangle', 'ellipse': 'ellipse',
+                  'text': 'text', 'note': 'note', 'callout': 'callout',
+                  'arrow': 'arrow', 'price label': 'price_label', 'price range': 'price_range',
+                };
+                canon = nameMap[n] || n.replace(/\s+/g, '_');
+              }
+              if (canon) entry.type = canon;
               var pts = safeCall(s, 'points');
               if (pts) entry.points = pts;
               // properties() returns a PropertyTree — flatten via state() if present.
