@@ -1,6 +1,6 @@
 # TradingView MCP — Claude Instructions
 
-68 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+70 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
 
 ## Decision Tree — Which Tool When
 
@@ -62,6 +62,19 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 ### "Screen multiple symbols"
 - `batch_run` with `symbols: ["ES1!", "NQ1!", "YM1!"]` and `action: "screenshot"` or `"get_ohlcv"`
 
+### "Read the same thing from every pane in my grid layout"
+Use `pane_read_batch` — one CDP call reads all panes. 8–10× faster than per-pane `pane_focus` + `data_*` loops.
+
+1. `pane_set_layout` + `pane_set_symbol(×N)` → prep the grid
+2. `pane_set_timeframe({index, timeframe})` → no-focus timeframe change per pane
+3. `pane_read_batch({ indices, reads, wait_ms })` → read any combination of:
+   - `pine_tables: { study_filter }` / `pine_lines` / `pine_labels: { max_labels }` / `pine_boxes`
+   - `study_values: true` — all visible indicator values per pane
+   - `ohlcv_summary: true` or `{ bars: N }` — compact price summary per pane
+   - `drawings: true` — hand-drawn trend lines, fibs, rectangles, labels per pane
+
+Per-pane output: `{ index, symbol, resolution, pine_tables?, pine_lines?, ..., drawings?, error? }`. Omit `indices` to read all panes in the layout.
+
 ### "Draw on the chart"
 - `draw_shape` → horizontal_line, trend_line, rectangle, text (pass point + optional point2)
 - `draw_list` → see what's drawn
@@ -109,6 +122,7 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 | `data_get_ohlcv` (summary) | ~500 bytes |
 | `data_get_ohlcv` (100 bars) | ~8 KB |
 | `capture_screenshot` | ~300 bytes (returns file path, not image data) |
+| `pane_read_batch` (8 panes, tables only) | ~5-15 KB (scales with reads × panes — always pass `study_filter`) |
 
 ## Tool Conventions
 

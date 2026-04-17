@@ -22,7 +22,7 @@ const server = new McpServer(
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 78 tools for reading and controlling a live TradingView Desktop chart.
+    instructions: `TradingView MCP — 80 tools for reading and controlling a live TradingView Desktop chart.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -57,7 +57,12 @@ Batch: batch_run → run action across multiple symbols/timeframes
 Drawing: draw_shape → horizontal_line, trend_line, rectangle, text
 Alerts: alert_create, alert_list, alert_delete
 Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
-Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
+Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol, pane_set_timeframe
+
+Batched multi-pane reads (grid layouts — MUCH faster than per-pane loops):
+- pane_read_batch → read pine_tables/lines/labels/boxes, study_values, ohlcv_summary, and drawings from MULTIPLE panes in ONE CDP call. Replaces the pane_focus + data_* loop.
+- pane_set_timeframe → change a single pane's timeframe without focusing it.
+- Typical flow: pane_set_layout → pane_set_symbol(×N) → pane_set_timeframe(×N) → pane_read_batch({reads: {...}}).
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
 CONTEXT MANAGEMENT:

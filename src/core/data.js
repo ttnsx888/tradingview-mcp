@@ -8,12 +8,16 @@ const MAX_TRADES = 20;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
-function buildGraphicsJS(collectionName, mapKey, filter) {
+// Inline JS fragment that reads one primitives collection from a given chart widget expression.
+// `chartWidgetExpr` must evaluate in CDP context to the inner chart widget
+// (i.e. what `window.TradingViewApi._activeChartWidgetWV.value()._chartWidget` returns,
+//  or equivalently `window.TradingViewApi._chartWidgetCollection.getAll()[i]`).
+function buildGraphicsJS(collectionName, mapKey, filter, chartWidgetExpr) {
+  const widget = chartWidgetExpr || 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget';
   return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-      var model = chart.model();
-      var sources = model.model().dataSources();
+      var chart = ${widget};
+      var sources = chart.model().model().dataSources();
       var results = [];
       var filter = ${safeString(filter || '')};
       for (var si = 0; si < sources.length; si++) {
@@ -26,31 +30,14 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
           if (filter && name.indexOf(filter) === -1) continue;
           var g = s._graphics;
           if (!g || !g._primitivesCollection) continue;
-          var pc = g._primitivesCollection;
+          var outer = g._primitivesCollection[${safeString(collectionName)}];
+          if (!outer || typeof outer.get !== 'function') continue;
+          var inner = outer.get(${safeString(mapKey)});
+          if (!inner || !inner._primitivesDataById) continue;
+          var map = inner._primitivesDataById;
+          if (typeof map.forEach !== 'function') continue;
           var items = [];
-          try {
-            var outer = pc.${collectionName};
-            if (outer) {
-              var inner = outer.get('${mapKey}');
-              if (inner) {
-                var coll = inner.get(false);
-                if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0) {
-                  coll._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
-                }
-              }
-            }
-          } catch(e) {}
-          if (items.length === 0 && '${collectionName}' === 'dwgtablecells') {
-            try {
-              var tcOuter = pc.dwgtablecells;
-              if (tcOuter) {
-                var tcColl = tcOuter.get('tableCells');
-                if (tcColl && tcColl._primitivesDataById && tcColl._primitivesDataById.size > 0) {
-                  tcColl._primitivesDataById.forEach(function(v, id) { items.push({id: id, raw: v}); });
-                }
-              }
-            } catch(e) {}
-          }
+          map.forEach(function(v, id) { items.push({id: id, raw: v}); });
           if (items.length > 0) results.push({name: name, count: items.length, items: items});
         } catch(e) {}
       }
@@ -321,12 +308,12 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
-  const data = await evaluate(`
+function buildStudyValuesJS(chartWidgetExpr) {
+  const widget = chartWidgetExpr || 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget';
+  return `
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-      var model = chart.model();
-      var sources = model.model().dataSources();
+      var chart = ${widget};
+      var sources = chart.model().model().dataSources();
       var results = [];
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
@@ -343,7 +330,7 @@ export async function getStudyValues() {
               if (items) {
                 for (var i = 0; i < items.length; i++) {
                   var item = items[i];
-                  if (item._value && item._value !== '∅' && item._title) values[item._title] = item._value;
+                  if (item._value && item._value !== '\u2205' && item._title) values[item._title] = item._value;
                 }
               }
             }
@@ -353,16 +340,35 @@ export async function getStudyValues() {
       }
       return results;
     })()
-  `);
+  `;
+}
+
+export async function getStudyValues() {
+  const data = await evaluate(buildStudyValuesJS());
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {
-  const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', study_filter || ''));
+  const studies = formatPineLines(raw, verbose);
+  return { success: true, study_count: studies.length, studies };
+}
 
-  const studies = raw.map(s => {
+export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', study_filter || ''));
+  const studies = formatPineLabels(raw, max_labels, verbose);
+  return { success: true, study_count: studies.length, studies };
+}
+
+export async function getPineTables({ study_filter } = {}) {
+  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', study_filter || ''));
+  const studies = formatPineTables(raw);
+  return { success: true, study_count: studies.length, studies };
+}
+
+// Post-process helpers — pull the single-pane formatting logic out so batchReadPanes can reuse it.
+function formatPineLines(raw, verbose) {
+  return (raw || []).map(s => {
     const hLevels = [];
     const seen = {};
     const allLines = [];
@@ -378,16 +384,11 @@ export async function getPineLines({ study_filter, verbose } = {}) {
     if (verbose) result.all_lines = allLines;
     return result;
   });
-  return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
-  const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
-
+function formatPineLabels(raw, max_labels, verbose) {
   const limit = max_labels || 50;
-  const studies = raw.map(s => {
+  return (raw || []).map(s => {
     let labels = s.items.map(item => {
       const v = item.raw;
       const text = v.t || '';
@@ -398,15 +399,10 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
     if (labels.length > limit) labels = labels.slice(-limit);
     return { name: s.name, total_labels: s.count, showing: labels.length, labels };
   });
-  return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineTables({ study_filter } = {}) {
-  const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
-
-  const studies = raw.map(s => {
+function formatPineTables(raw) {
+  return (raw || []).map(s => {
     const tables = {};
     for (const item of s.items) {
       const v = item.raw;
@@ -415,7 +411,7 @@ export async function getPineTables({ study_filter } = {}) {
       if (!tables[tid][v.row]) tables[tid][v.row] = {};
       tables[tid][v.row][v.col] = v.t || '';
     }
-    const tableList = Object.entries(tables).map(([tid, rows]) => {
+    const tableList = Object.entries(tables).map(([_tid, rows]) => {
       const rowNums = Object.keys(rows).map(Number).sort((a, b) => a - b);
       const formatted = rowNums.map(rn => {
         const cols = rows[rn];
@@ -426,15 +422,10 @@ export async function getPineTables({ study_filter } = {}) {
     });
     return { name: s.name, tables: tableList };
   });
-  return { success: true, study_count: studies.length, studies };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
-  const filter = study_filter || '';
-  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
-
-  const studies = raw.map(s => {
+function formatPineBoxes(raw, verbose) {
+  return (raw || []).map(s => {
     const zones = [];
     const seen = {};
     const allBoxes = [];
@@ -450,5 +441,260 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     if (verbose) result.all_boxes = allBoxes;
     return result;
   });
+}
+
+export async function getPineBoxes({ study_filter, verbose } = {}) {
+  const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', study_filter || ''));
+  const studies = formatPineBoxes(raw, verbose);
   return { success: true, study_count: studies.length, studies };
+}
+
+// ────────────────────────────────────────────────────────────
+// batchReadPanes — one CDP call, N panes, multiple read types.
+// Replaces the pane_focus → data_* loop for multi-symbol grid workflows.
+// ────────────────────────────────────────────────────────────
+//
+// Reads iterate pane indices directly via window.TradingViewApi._chartWidgetCollection.getAll(),
+// bypassing the single _activeChartWidgetWV singleton. Pine graphics, study values, and line-tool
+// drawings are all populated on non-active panes (verified live against an 8-pane grid).
+//
+// Drawings note: the outer wrapper's getAllShapes()/getShapeById() exists only for the active pane.
+// For batch reads we walk the raw LineTool data sources directly — same underlying data, slightly
+// different accessor (id()/name()/points()/properties()/isVisible()/isLocked() instead of the
+// wrapper's getPoints()/getProperties()/etc.). Output shape is documented per-read below.
+
+export async function batchReadPanes({ indices, reads, wait_ms } = {}) {
+  if (!reads || typeof reads !== 'object') throw new Error('batchReadPanes: `reads` is required');
+
+  const idxArg = Array.isArray(indices) && indices.length > 0
+    ? JSON.stringify(indices.map(Number))
+    : 'null';
+  const waitMs = Number(wait_ms) > 0 ? Math.min(Number(wait_ms), 5000) : 0;
+  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+
+  const wantTables      = !!reads.pine_tables;
+  const wantLines       = !!reads.pine_lines;
+  const wantLabels      = !!reads.pine_labels;
+  const wantBoxes       = !!reads.pine_boxes;
+  const wantStudyValues = !!reads.study_values;
+  const wantOhlcv       = !!reads.ohlcv_summary;
+  const wantDrawings    = !!reads.drawings;
+
+  const tablesFilter = reads.pine_tables?.study_filter || '';
+  const linesFilter  = reads.pine_lines?.study_filter  || '';
+  const labelsFilter = reads.pine_labels?.study_filter || '';
+  const boxesFilter  = reads.pine_boxes?.study_filter  || '';
+  const ohlcvBars    = Math.min(Math.max(Number(reads.ohlcv_summary?.bars) || 20, 2), 500);
+
+  const expression = `
+    (function() {
+      var cwc = window.TradingViewApi._chartWidgetCollection;
+      var all = cwc.getAll();
+      var layoutType = cwc._layoutType;
+      if (typeof layoutType === 'object' && layoutType && typeof layoutType.value === 'function') layoutType = layoutType.value();
+      var inlineCount = cwc.inlineChartsCount;
+      if (typeof inlineCount === 'object' && inlineCount && typeof inlineCount.value === 'function') inlineCount = inlineCount.value();
+      var paneCount = Math.min(all.length, inlineCount || all.length);
+
+      var requestedIndices = ${idxArg};
+      var idxList = [];
+      if (requestedIndices) {
+        for (var i = 0; i < requestedIndices.length; i++) {
+          var ri = requestedIndices[i];
+          if (ri >= 0 && ri < paneCount) idxList.push(ri);
+        }
+      } else {
+        for (var j = 0; j < paneCount; j++) idxList.push(j);
+      }
+
+      function readGraphics(chart, collectionName, mapKey, filter) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var results = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            if (!s.metaInfo) continue;
+            try {
+              var meta = s.metaInfo();
+              var name = meta.description || meta.shortDescription || '';
+              if (!name) continue;
+              if (filter && name.indexOf(filter) === -1) continue;
+              var g = s._graphics;
+              if (!g || !g._primitivesCollection) continue;
+              var outer = g._primitivesCollection[collectionName];
+              if (!outer || typeof outer.get !== 'function') continue;
+              var inner = outer.get(mapKey);
+              if (!inner || !inner._primitivesDataById) continue;
+              var map = inner._primitivesDataById;
+              if (typeof map.forEach !== 'function') continue;
+              var items = [];
+              map.forEach(function(v, id) { items.push({id: id, raw: v}); });
+              if (items.length > 0) results.push({name: name, count: items.length, items: items});
+            } catch(e) {}
+          }
+          return results;
+        } catch(e) { return []; }
+      }
+
+      function readStudyValues(chart) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var results = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            if (!s.metaInfo) continue;
+            try {
+              var meta = s.metaInfo();
+              var name = meta.description || meta.shortDescription || '';
+              if (!name) continue;
+              var values = {};
+              try {
+                var dwv = s.dataWindowView();
+                if (dwv) {
+                  var items = dwv.items();
+                  if (items) {
+                    for (var i = 0; i < items.length; i++) {
+                      var it = items[i];
+                      if (it._value && it._value !== '\u2205' && it._title) values[it._title] = it._value;
+                    }
+                  }
+                }
+              } catch(e) {}
+              if (Object.keys(values).length > 0) results.push({ name: name, values: values });
+            } catch(e) {}
+          }
+          return results;
+        } catch(e) { return []; }
+      }
+
+      function readOhlcv(chart, barCount) {
+        try {
+          var bars = chart.model().mainSeries().bars();
+          if (!bars || typeof bars.lastIndex !== 'function') return null;
+          var end = bars.lastIndex();
+          var start = Math.max(bars.firstIndex(), end - barCount + 1);
+          var out = [];
+          for (var i = start; i <= end; i++) {
+            var v = bars.valueAt(i);
+            if (v) out.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
+          }
+          if (out.length === 0) return null;
+          var first = out[0];
+          var last = out[out.length - 1];
+          var high = -Infinity, low = Infinity, volSum = 0;
+          for (var k = 0; k < out.length; k++) {
+            if (out[k].high > high) high = out[k].high;
+            if (out[k].low < low) low = out[k].low;
+            volSum += out[k].volume;
+          }
+          return {
+            bar_count: out.length,
+            period: { from: first.time, to: last.time },
+            open: first.open, close: last.close, high: high, low: low,
+            range: Math.round((high - low) * 100) / 100,
+            change: Math.round((last.close - first.open) * 100) / 100,
+            change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
+            avg_volume: Math.round(volSum / out.length),
+            last_5_bars: out.slice(-5),
+            total_bars: bars.size()
+          };
+        } catch(e) { return { error: e.message }; }
+      }
+
+      function safeCall(obj, method) {
+        try { if (typeof obj[method] === 'function') return obj[method](); } catch(e) {}
+        return undefined;
+      }
+
+      function readDrawings(chart) {
+        try {
+          var sources = chart.model().model().dataSources();
+          var out = [];
+          for (var si = 0; si < sources.length; si++) {
+            var s = sources[si];
+            // Line-tool data sources expose points() + properties(). Indicators don't.
+            if (typeof s.points !== 'function' || typeof s.properties !== 'function') continue;
+            try {
+              var id = safeCall(s, 'id');
+              if (typeof id !== 'string' && typeof id !== 'number') continue;
+              var entry = { entity_id: id };
+              // Display name: LineTool classes expose name() (e.g. "Fib retracement", "Trend line").
+              var nm = safeCall(s, 'name');
+              if (typeof nm === 'string') entry.name = nm;
+              else if (typeof s.toolname === 'string') entry.name = s.toolname;
+              var pts = safeCall(s, 'points');
+              if (pts) entry.points = pts;
+              // properties() returns a PropertyTree — flatten via state() if present.
+              try {
+                var pRaw = s.properties();
+                if (pRaw) {
+                  var flat = (typeof pRaw.state === 'function') ? pRaw.state() : pRaw;
+                  entry.properties = flat;
+                }
+              } catch(e) { entry.properties_error = e.message; }
+              var vis = safeCall(s, 'isVisible');
+              if (vis !== undefined) entry.visible = vis;
+              var lock = safeCall(s, 'isLocked');
+              if (lock !== undefined) entry.locked = lock;
+              var sel = safeCall(s, 'isSelectionEnabled');
+              if (sel !== undefined) entry.selectable = sel;
+              out.push(entry);
+            } catch(e) {}
+          }
+          return out;
+        } catch(e) { return []; }
+      }
+
+      var panes = [];
+      for (var p = 0; p < idxList.length; p++) {
+        var idx = idxList[p];
+        var chart = all[idx];
+        var paneOut = { index: idx };
+        try {
+          var ms = chart.model().mainSeries();
+          paneOut.symbol = ms.symbol();
+          paneOut.resolution = ms.interval();
+          ${wantTables      ? 'paneOut.pine_tables  = readGraphics(chart, "dwgtablecells", "tableCells", ' + JSON.stringify(tablesFilter) + ');' : ''}
+          ${wantLines       ? 'paneOut.pine_lines   = readGraphics(chart, "dwglines",      "lines",      ' + JSON.stringify(linesFilter)  + ');' : ''}
+          ${wantLabels      ? 'paneOut.pine_labels  = readGraphics(chart, "dwglabels",     "labels",     ' + JSON.stringify(labelsFilter) + ');' : ''}
+          ${wantBoxes       ? 'paneOut.pine_boxes   = readGraphics(chart, "dwgboxes",      "boxes",      ' + JSON.stringify(boxesFilter)  + ');' : ''}
+          ${wantStudyValues ? 'paneOut.study_values = readStudyValues(chart);' : ''}
+          ${wantOhlcv       ? 'paneOut.ohlcv_summary = readOhlcv(chart, ' + ohlcvBars + ');' : ''}
+          ${wantDrawings    ? 'paneOut.drawings = readDrawings(chart);' : ''}
+        } catch(e) { paneOut.error = e.message; }
+        panes.push(paneOut);
+      }
+
+      return { layout: layoutType, pane_count: paneCount, panes: panes };
+    })()
+  `;
+
+  const rawResult = await evaluate(expression);
+  if (!rawResult) throw new Error('batchReadPanes: empty response from CDP');
+
+  const labelsMax = reads.pine_labels?.max_labels;
+  const linesVerbose  = !!reads.pine_lines?.verbose;
+  const labelsVerbose = !!reads.pine_labels?.verbose;
+  const boxesVerbose  = !!reads.pine_boxes?.verbose;
+
+  const panes = rawResult.panes.map(p => {
+    const out = { index: p.index, symbol: p.symbol, resolution: p.resolution };
+    if (p.error) out.error = p.error;
+    if (p.pine_tables)  out.pine_tables  = formatPineTables(p.pine_tables);
+    if (p.pine_lines)   out.pine_lines   = formatPineLines(p.pine_lines, linesVerbose);
+    if (p.pine_labels)  out.pine_labels  = formatPineLabels(p.pine_labels, labelsMax, labelsVerbose);
+    if (p.pine_boxes)   out.pine_boxes   = formatPineBoxes(p.pine_boxes, boxesVerbose);
+    if (p.study_values) out.study_values = p.study_values;
+    if (p.ohlcv_summary) out.ohlcv_summary = p.ohlcv_summary;
+    if (p.drawings)     out.drawings     = p.drawings;
+    return out;
+  });
+
+  return {
+    success: true,
+    layout: rawResult.layout,
+    pane_count: rawResult.pane_count,
+    requested: panes.length,
+    panes,
+  };
 }
